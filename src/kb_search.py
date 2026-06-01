@@ -56,47 +56,112 @@ class KnowledgeBaseSearch:
         return content
 
     def _split_sections(self, content: str) -> Dict[str, str]:
-        """将文档按章节分割"""
+        """将文档按章节分割（支持三级标题）"""
         sections = {}
         current_section = 'root'
+        current_subsection = None
         current_content = []
 
         lines = content.split('\n')
         for line in lines:
-            # 检测标题（## 开头）
+            # 检测二级标题（## 开头）
             if line.startswith('## '):
                 if current_content:
-                    sections[current_section] = '\n'.join(current_content).strip()
+                    # 保存当前内容
+                    key = current_subsection if current_subsection else current_section
+                    sections[key] = '\n'.join(current_content).strip()
                 current_section = line[3:].strip()
+                current_subsection = None
+                current_content = [line]
+            # 检测三级标题（### 开头）
+            elif line.startswith('### '):
+                if current_content:
+                    # 保存三级标题之前的内容
+                    if current_subsection:
+                        sections[current_subsection] = '\n'.join(current_content).strip()
+                    current_content = []
+                current_subsection = line[4:].strip()
                 current_content = [line]
             else:
                 current_content.append(line)
 
+        # 保存最后的内容
         if current_content:
-            sections[current_section] = '\n'.join(current_content).strip()
+            key = current_subsection if current_subsection else current_section
+            if key:
+                sections[key] = '\n'.join(current_content).strip()
 
         return sections
 
     def _calculate_relevance(self, content: str, keywords: List[str]) -> float:
         """计算相关度分数"""
         score = 0.0
-        content_lower = content.lower()
 
         for kw in keywords:
-            kw_lower = kw.lower()
             # 精确匹配加分
-            if kw_lower in content_lower:
+            if kw in content:
                 score += 10
-                # 标题匹配额外加分
-                if content.startswith('#') and kw_lower in content_lower[:50]:
-                    score += 5
+                # 标题匹配额外加分（## 后的章节名）
+                section_title_match = re.search(r'##\s+.*' + kw, content)
+                if section_title_match:
+                    score += 20  # 章节标题匹配权重更高
+                # 子标题匹配
+                subsection_match = re.search(r'###\s+.*' + kw, content)
+                if subsection_match:
+                    score += 15
+                # 表格内容匹配（年假等在表格中）
+                if '|' + kw + '|' in content or kw in content and '|' in content:
+                    score += 12
 
         return score
 
+    def _search_in_document(
+        self,
+        content: str,
+        filename: str,
+        keywords: List[str]
+    ) -> List[KnowledgeResult]:
+        """在文档中搜索关键词"""
+        results = []
+        sections = self._split_sections(content)
+
+        for section_name, section_content in sections.items():
+            score = self._calculate_relevance(section_content, keywords)
+            if score > 0:
+                results.append(KnowledgeResult(
+                    content=section_content,
+                    source_file=filename,
+                    section=section_name if section_name != 'root' else None,
+                    relevance_score=score
+                ))
+
+        # 按相关度排序
+        results.sort(key=lambda x: x.relevance_score, reverse=True)
+        return results
+
     def search_hr_policies(self, keywords: List[str]) -> List[KnowledgeResult]:
-        """搜索人事制度"""
+        """搜索人事制度 - 添加关键词优化"""
         content = self._load_document('hr_policies.md')
-        return self._search_in_document(content, 'hr_policies.md', keywords)
+
+        # 关键词映射：将问题关键词映射到更精准的搜索关键词
+        keyword_mapping = {
+            '年假': ['年假', '请假类型', '入职满'],
+            '病假': ['病假', '请假类型'],
+            '事假': ['事假', '请假类型'],
+            '迟到': ['迟到规则', '迟到', '扣款'],
+            '扣钱': ['迟到规则', '扣款', '迟到'],
+            '加班': ['加班制度', '加班'],
+            '调休': ['调休制度', '调休'],
+        }
+
+        # 扩展关键词
+        expanded_keywords = []
+        for kw in keywords:
+            expanded_keywords.append(kw)
+            if kw in keyword_mapping:
+                expanded_keywords.extend(keyword_mapping[kw])
+
+        return self._search_in_document(content, 'hr_policies.md', expanded_keywords)
 
     def search_promotion_rules(self, keywords: List[str]) -> List[KnowledgeResult]:
         """搜索晋升规则"""

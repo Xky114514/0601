@@ -219,9 +219,19 @@ class ResultFusion:
 
         # 简化内容输出
         content = best_result.content
-        # 提取关键信息
+        # 提取关键信息（排除标题行和空行）
         lines = content.split('\n')
         key_lines = [l for l in lines if l.strip() and not l.startswith('#')]
+
+        # 【新增】检查是否有实际内容
+        if not key_lines or len(key_lines) < 2:
+            # 内容不足，返回无相关信息
+            return Answer(
+                text=f"抱歉，没有找到关于「{intent.original_question}」的具体信息。请尝试其他关键词。",
+                sources=[],
+                confidence=0.0,
+                needs_more_info=True
+            )
 
         return Answer(
             text=f"根据《{best_result.source_file.replace('.md', '')}》：\n" + '\n'.join(key_lines[:10]),

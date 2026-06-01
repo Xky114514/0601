@@ -103,6 +103,15 @@ class IntentParser:
                 original_question=question
             )
 
+        # 【新增】检查无意义问题（包含随机字符串）
+        if self._detect_random_content(question):
+            return Intent(
+                query_type=QueryType.INVALID,
+                data_sources=[],
+                entities={'error': '无意义内容'},
+                original_question=question
+            )
+
         # 提取实体
         entities = self._extract_entities(question)
 
@@ -121,6 +130,25 @@ class IntentParser:
             needs_time_calculation=needs_time_calc,
             needs_promotion_check=needs_promotion_check
         )
+
+    def _detect_random_content(self, question: str) -> bool:
+        """检测无意义的随机字符串内容"""
+        # 检查是否包含看起来像随机字符串的内容
+        # 如 "xyzabc123" 或 "qwerty" 等无意义组合
+        random_patterns = [
+            r'[a-zA-Z]{6,}\d+',  # 连续6个以上字母+数字
+            r'\d+[a-zA-Z]{6,}',  # 数字+连续6个以上字母
+            r'[a-zA-Z]{10,}',    # 连续10个以上字母（无意义）
+        ]
+        for pattern in random_patterns:
+            if re.search(pattern, question):
+                # 检查是否是有效的英文单词（排除特殊情况）
+                match = re.search(pattern, question)
+                matched_text = match.group()
+                # 如果全是小写字母且长度大于8，很可能是随机字符串
+                if matched_text.islower() and len(matched_text) > 8:
+                    return True
+        return False
 
     def _detect_sql_injection(self, question: str) -> bool:
         """检测 SQL 注入攻击"""
@@ -165,7 +193,7 @@ class IntentParser:
         # 提取时间
         time_patterns = [
             (r'(\d{4})年(\d{1,2})月', 'year_month'),
-            (r'(\d{1,2})月', 'month_only'),
+            (r'(\d{1,2})\s*月', 'month_only'),  # 允许空格
             (r'上个月', 'last_month'),
             (r'去年', 'last_year'),
             (r'(\d{4})年', 'year_only'),
@@ -225,8 +253,11 @@ class IntentParser:
                     db_sources.append(source)
                     break
 
-        # 特殊处理：晋升检查需要混合查询
-        if '晋升' in question or ('符合' in question and entities.get('employee_name')):
+        has_specific_employee = entities.get('employee_name') is not None
+        emp_id = entities.get('employee_id')
+
+        # 【优先级1】晋升检查需要混合查询
+        if '晋升' in question or ('符合' in question and has_specific_employee):
             return QueryType.DB_KB_MIXED, [
                 DataSource.PROMOTION_RULES,
                 DataSource.EMPLOYEES,
@@ -234,36 +265,50 @@ class IntentParser:
                 DataSource.PROJECT_MEMBERS
             ]
 
-        # 特殊处理：员工基础信息查询
-        if entities.get('employee_name') or entities.get('employee_id'):
-            if '邮箱' in question or '部门' in question or '上级' in question:
-                return QueryType.DB_ONLY, [DataSource.EMPLOYEES]
+        # 【优先级2】员工有具体问题时，根据问题类型判断
+        if has_specific_employee or emp_id:
             if '项目' in question or '负责' in question:
                 return QueryType.DB_MULTI_TABLE, [DataSource.PROJECTS, DataSource.PROJECT_MEMBERS]
             if '迟到' in question:
                 return QueryType.TIME_RANGE, [DataSource.ATTENDANCE]
             if '绩效' in question or 'KPI' in question:
                 return QueryType.DB_ONLY, [DataSource.PERFORMANCE]
+            if '邮箱' in question or '部门' in question or '上级' in question:
+                return QueryType.DB_ONLY, [DataSource.EMPLOYEES]
+            # 【新增】单纯员工ID查询（如 "查一下 EMP-999"）
+            if emp_id and emp_id.startswith('EMP-') and not has_specific_employee:
+                return QueryType.DB_ONLY, [DataSource.EMPLOYEES]
 
-        # 部门人数查询
+        # 【优先级3】部门人数查询
         if '多少人' in question or '人数' in question:
             return QueryType.DB_ONLY, [DataSource.EMPLOYEES]
 
-        # 纯知识库查询
+        # 【优先级4】政策类问题优先判断为知识库查询（无具体员工时）
+        policy_indicators = ['怎么', '如何', '政策', '规定', '扣钱', '几次', '计算', '标准', '条件', '规则']
+        is_policy_question = any(kw in question for kw in policy_indicators)
+
+        if is_policy_question and not has_specific_employee:
+            if kb_sources:
+                return QueryType.KB_ONLY, kb_sources
+
+        # 【优先级5】纯知识库查询
         if kb_sources and not db_sources:
             return QueryType.KB_ONLY, kb_sources
 
-        # 纯数据库查询
+        # 【优先级6】纯数据库查询
         if db_sources and not kb_sources:
             if len(db_sources) > 1:
                 return QueryType.DB_MULTI_TABLE, db_sources
             return QueryType.DB_ONLY, db_sources
 
-        # 混合查询
+        # 【优先级7】混合查询
         if kb_sources and db_sources:
-            return QueryType.DB_KB_MIXED, kb_sources + db_sources
+            if has_specific_employee:
+                return QueryType.DB_KB_MIXED, kb_sources + db_sources
+            else:
+                return QueryType.KB_ONLY, kb_sources
 
-        # 模糊查询
+        # 【优先级8】模糊查询
         if '最近' in question or '什么事' in question:
             return QueryType.FUZZY, [DataSource.MEETING_NOTES, DataSource.PROJECTS]
 
